@@ -1,0 +1,9 @@
+id = "omp-agent"
+name = "OMP Agent"
+version = "0.1.0"
+schema_version = 1
+authors = ["omp-acp contributors <you@example.com>"]
+description = "Oh My Pi (omp) agent for Zed: ACP external agent + MCP tools that bridge omp into the Agent Panel"
+repository = "https://github.com/lurendie/omp-acp"
+
+[context_servers.omp]
