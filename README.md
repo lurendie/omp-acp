@@ -84,7 +84,7 @@ Agent Panel → New Thread → 选 **OMP**。线程由 omp 驱动：模型/认�
       "autoConfirm": false,                                       // 默认 false!
       "timeoutMs": 600000,                                        // omp_run 默认超时
       "sessionDir": "C:\\path\\to\\sessions",                     // 默认 ~/.omp/agent/sessions
-      "bridgePath": "C:\\path\\to\\bridge\\server.cjs",           // 默认 ~/.omp/zed/bridge.cjs
+      "bridgePath": "C:\\path\\to\\bridge\\server.cjs",           // 默认 ~/.omp/zed/bridge.cjs；Windows 上必填（安装脚本自动写入）
       "extraArgs": ["--profile", "zed"]                           // 附加到 `omp --mode rpc`
     }
   }
@@ -125,7 +125,8 @@ omp-acp/
 
 ## 设计说明与已知边界
 
-- **WASM 沙箱无 FS/交互 stdio**：扩展无法解析 `$HOME` 或常驻子进程，因此 context server 用 `node -e` 加载器 + 用户级固定路径（`~/.omp/zed/bridge.cjs`）落地桥脚本；路径可用 `bridgePath` 覆盖。
+- **WASM 沙箱无 FS/交互 stdio**：扩展无法解析 `$HOME` 或常驻子进程，因此 context server 通过用户级固定路径（`~/.omp/zed/bridge.cjs`，可用 `bridgePath` 覆盖）落地桥脚本。
+- **Windows 上必须直启桥文件（`node <bridgePath>`），不能用 `node -e` 加载器**：Zed 在 Windows 上用 `cmd.exe /S /C` 包装所有 stdio context server 命令，并对参数做 caret 转义；`node -e` 加载器里的 `|`、`(`、`)`、换行会被 cmd 截断/拆分，node 根本起不来，Zed 报 `Context server request timeout`。因此扩展优先使用 settings 里的 `bridgePath` 直启桥文件（普通路径无 shell 特殊字符，可安全穿过包装）；`install.ps1` 会自动写入该设置。未配置 `bridgePath` 时回退到 `node -e` 加载器（macOS/Linux 可用，Windows 上会启动失败）。
 - **桥按项目常驻**：Zed 以项目根为 cwd 启动 context server，omp 以 `--cwd <项目根>` 运行，会话天然按项目隔离。
 - **omp 的 ACP 是 v1**：`omp acp` 对 initialize 应答 `protocolVersion: 1`，Zed 会协商降级，正常可用（已在 1.14.2 验证握手）。
 - **发布注意**：扩展 id `omp-agent` 符合 Zed 注册表规则（不含 `zed`/`extension` 字样）；MCP 扩展（含 context server 扩展）官方计划逐步迁移到 MCP 官方注册表（见 [tracking issue](https://github.com/zed-industries/zed/issues/59351)），本扩展的外部代理部分（ACP）不受影响。

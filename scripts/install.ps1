@@ -96,6 +96,10 @@ $csSettings = @{}
 if ($Model) { $csSettings["model"] = $Model }
 if ($AutoConfirm) { $csSettings["autoConfirm"] = $true }
 if ($SessionDir) { $csSettings["sessionDir"] = $SessionDir }
+# The bridge must be launched as `node <path>` (not via `node -e`): Zed wraps
+# context server commands in cmd.exe /S /C on Windows, which mangles the
+# loader's pipes/parens and makes the server time out on startup.
+$csSettings["bridgePath"] = $BridgeDest
 $patch = @{
   agent_servers   = @{ omp = $agentServer }
   context_servers = @{ omp = @{ enabled = $true; remote = $false; settings = $csSettings } }

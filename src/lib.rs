@@ -5,24 +5,35 @@
 //!    `omp acp` under `agent_servers.omp` in Zed settings, giving a full
 //!    Agent Panel thread driven by omp (model auth, tools, sessions owned by omp).
 //! 2. **MCP context server** — this extension exposes the `omp` context server:
-//!    a Node bridge (`bridge/server.mjs`) that hosts a persistent
+//!    a Node bridge (`bridge/server.cjs`) that hosts a persistent
 //!    `omp --mode rpc` child per project and exposes omp as MCP tools
 //!    (`omp_run`, `omp_continue`, `omp_status`, ...) callable by the built-in
 //!    Zed Agent for delegation.
 //!
 //! The WASM sandbox cannot resolve `$HOME` or spawn interactive processes, so
-//! the context server command is a tiny `node -e` loader that resolves the
-//! bridge script (default `~/.omp/zed/bridge.mjs`, overridable via
-//! `context_servers.omp.settings.bridgePath`) and forwards the user settings
-//! JSON through the `OMP_ZED_CFG` environment variable.
+//! the context server command is a tiny `node -e` loader (POSIX fallback) or —
+//! preferred, and required on Windows — a direct `node <bridgePath>` launch
+//! where `bridgePath` comes from `context_servers.omp.settings` (written by
+//! scripts/install.ps1). Settings JSON is forwarded through the
+//! `OMP_ZED_CFG` environment variable.
 
 use zed_extension_api as zed;
 
 /// Must match `[context_servers.omp]` in extension.toml.
 const CONTEXT_SERVER_ID: &str = "omp";
 
-/// Loader that runs the bridge with Node. The bridge path and settings come
-/// from the environment because the WASM extension has no home/FS access.
+/// Fallback loader that runs the bridge with Node. The bridge path and
+/// settings come from the environment because the WASM extension has no
+/// home/FS access.
+///
+/// NOTE: this `node -e` form only works on POSIX. Zed wraps every stdio
+/// context server command in `cmd.exe /S /C` on Windows, and the caret
+/// escaping (`quote_cmd` in crates/util/src/shell.rs) plus cmd treating `|`
+/// `&` `<` `>` as separators even inside double quotes mangles multi-line
+/// loaders containing parens/pipes — node never starts and Zed reports
+/// "Context server request timeout". On Windows the extension therefore uses
+/// the direct `node <bridge.cjs>` form from `settings.bridgePath` instead
+/// (written by scripts/install.ps1), which has no shell-special characters.
 const BRIDGE_LOADER: &str = r#"const fs=require('fs'),path=require('path'),os=require('os');
 let bridge=process.env.OMP_ZED_BRIDGE||path.join(os.homedir(),'.omp','zed','bridge.cjs');
 if(!fs.existsSync(bridge)){console.error('[omp-mcp] bridge not found: '+bridge);process.exit(1);}
@@ -39,7 +50,7 @@ fn settings_schema() -> String {
     "autoConfirm": { "type": "boolean", "description": "Auto-confirm omp ask/approval dialogs. Off by default: confirm requests are answered with 'no' and logged.", "default": false },
     "timeoutMs": { "type": "number", "description": "Default timeout for omp_run / omp_continue (ms)", "default": 600000 },
     "sessionDir": { "type": "string", "description": "omp session directory for omp_continue / omp_sessions (default: ~/.omp/agent/sessions)" },
-    "bridgePath": { "type": "string", "description": "Path to bridge/server.cjs (default: ~/.omp/zed/bridge.cjs)" },
+    "bridgePath": { "type": "string", "description": "Path to bridge/server.cjs (default: ~/.omp/zed/bridge.cjs). REQUIRED on Windows: the fallback `node -e` loader cannot survive Zed's cmd.exe wrapper, so the bridge is launched as `node <bridgePath>` instead. install.ps1 writes this automatically." },
     "extraArgs": { "type": "array", "items": { "type": "string" }, "description": "Extra CLI args appended to `omp --mode rpc` (e.g. --profile)" }
   }
 }"#
@@ -59,7 +70,7 @@ impl zed::Extension for OmpExtension {
         _project: &zed::Project,
     ) -> Result<Option<zed::ContextServerConfiguration>, String> {
         Ok(Some(zed::ContextServerConfiguration {
-            installation_instructions: "Run `scripts/install.ps1` from the omp-acp repository, or copy `bridge/server.mjs` to `~/.omp/zed/bridge.mjs` and configure `context_servers.omp.settings` in Zed settings.".into(),
+            installation_instructions: "Run `scripts/install.ps1` from the omp-acp repository, or copy `bridge/server.cjs` to `~/.omp/zed/bridge.cjs` and configure `context_servers.omp.settings` (including `bridgePath`) in Zed settings.".into(),
             settings_schema: settings_schema(),
             default_settings: "{}".into(),
         }))
@@ -78,14 +89,37 @@ impl zed::Extension for OmpExtension {
             zed::settings::ContextServerSettings::for_project(CONTEXT_SERVER_ID, project)?;
 
         let mut env: Vec<(String, String)> = Vec::new();
-        if let Some(json) = settings.settings {
+        if let Some(json) = settings.settings.as_ref() {
             env.push(("OMP_ZED_CFG".to_string(), json.to_string()));
         }
 
-        let mut cmd = zed::Command {
-            command: zed::node_binary_path()?,
-            args: vec!["-e".to_string(), BRIDGE_LOADER.to_string()],
-            env,
+        // Prefer the direct `node <bridge.cjs>` form: on Windows, Zed spawns
+        // stdio context servers through `cmd.exe /S /C` (ShellBuilder in
+        // crates/context_server/src/transport/stdio_transport.rs) with caret
+        // escaping, and the `-e` loader below contains `|`, `(`, `)` and
+        // newlines that cmd mangles — the process dies instantly and Zed
+        // reports "Context server request timeout". A plain script path has
+        // no shell-special characters and survives the wrapper. scripts/
+        // install.ps1 writes `bridgePath` into the settings; users who
+        // configure the bridge manually should set it too.
+        let bridge_from_settings = settings
+            .settings
+            .as_ref()
+            .and_then(|json| json.get("bridgePath"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        let mut cmd = match bridge_from_settings {
+            Some(bridge_path) => zed::Command {
+                command: zed::node_binary_path()?,
+                args: vec![bridge_path],
+                env,
+            },
+            None => zed::Command {
+                command: zed::node_binary_path()?,
+                args: vec!["-e".to_string(), BRIDGE_LOADER.to_string()],
+                env,
+            },
         };
 
         // Honor user overrides from `context_servers.omp.command`.
